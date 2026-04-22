@@ -85,10 +85,11 @@ export async function runCityReview(): Promise<{ processed: number; autoApproved
   // Deduplicate by city_raw
   const uniqueRaws = [...new Map(pending.map((r) => [r.city_raw, r])).values()]
 
-  // Get all canonical cities
+  // Get canonical cities — restrict to project scope (Java, Madura, Bali, Lombok)
   const { data: cities } = await db
     .from('cities')
     .select('id, name, name_sp2kp, kode_wilayah')
+    .in('island', ['Jawa', 'Madura', 'Bali', 'Lombok'])
 
   if (!cities?.length) return { processed, autoApproved, queued }
 
