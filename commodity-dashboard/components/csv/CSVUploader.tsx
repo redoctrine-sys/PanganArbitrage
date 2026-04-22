@@ -1,15 +1,9 @@
 'use client'
 
 import { useState, useRef } from 'react'
+import { parseSP2KPCSV } from '@/lib/csv/sp2kp-parser'
 import type { SP2KPRow } from '@/types/prices'
 import type { IngestResult } from '@/types/prices'
-
-type PreviewData = {
-  preview: SP2KPRow[]
-  total: number
-  valid: number
-  errors: string[]
-}
 
 type Props = {
   onSuccess?: (result: IngestResult) => void
@@ -17,8 +11,9 @@ type Props = {
 
 export default function CSVUploader({ onSuccess }: Props) {
   const [file, setFile] = useState<File | null>(null)
-  const [preview, setPreview] = useState<PreviewData | null>(null)
+  const [parsed, setParsed] = useState<{ rows: SP2KPRow[]; errors: string[]; total: number } | null>(null)
   const [loading, setLoading] = useState(false)
+  const [progress, setProgress] = useState<string | null>(null)
   const [result, setResult] = useState<IngestResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
@@ -27,14 +22,17 @@ export default function CSVUploader({ onSuccess }: Props) {
     setFile(f)
     setResult(null)
     setError(null)
+    setParsed(null)
     setLoading(true)
     try {
-      const fd = new FormData()
-      fd.append('file', f)
-      const res = await fetch('/api/csv/preview', { method: 'POST', body: fd })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Preview failed')
-      setPreview(data)
+      // Parse entirely client-side — no file upload to server, avoids Vercel 4.5MB body limit
+      const text = await f.text()
+      const data = parseSP2KPCSV(text)
+      if (data.rows.length === 0) {
+        setError(data.errors[0] ?? 'Tidak ada baris valid ditemukan')
+      } else {
+        setParsed(data)
+      }
     } catch (e: any) {
       setError(e.message)
     } finally {
@@ -43,21 +41,49 @@ export default function CSVUploader({ onSuccess }: Props) {
   }
 
   async function handleIngest() {
-    if (!file) return
+    if (!parsed?.rows.length) return
     setLoading(true)
     setError(null)
+
+    const BATCH = 500
+    let totalInserted = 0
+    let totalSkipped = 0
+    const allErrors: string[] = []
+
     try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const res = await fetch('/api/ingest/sp2kp', { method: 'POST', body: fd })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? 'Ingest failed')
-      setResult(data.result)
-      onSuccess?.(data.result)
+      for (let i = 0; i < parsed.rows.length; i += BATCH) {
+        const batch = parsed.rows.slice(i, i + BATCH)
+        setProgress(`Mengunggah ${Math.min(i + BATCH, parsed.rows.length)} / ${parsed.rows.length} baris...`)
+
+        const res = await fetch('/api/ingest/sp2kp/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ rows: batch }),
+        })
+
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(text.startsWith('{') ? JSON.parse(text).error : `HTTP ${res.status}`)
+        }
+
+        const data = await res.json()
+        totalInserted += data.result?.inserted ?? 0
+        totalSkipped += data.result?.skipped ?? 0
+        allErrors.push(...(data.result?.errors ?? []))
+      }
+
+      const finalResult: IngestResult = {
+        inserted: totalInserted,
+        skipped: totalSkipped,
+        errors: allErrors.slice(0, 20),
+      }
+      setResult(finalResult)
+      onSuccess?.(finalResult)
     } catch (e: any) {
       setError(e.message)
     } finally {
       setLoading(false)
+      setProgress(null)
     }
   }
 
@@ -69,7 +95,6 @@ export default function CSVUploader({ onSuccess }: Props) {
 
   return (
     <div className="space-y-3">
-      {/* Drop Zone */}
       {!file && (
         <div
           className="border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors"
@@ -81,7 +106,7 @@ export default function CSVUploader({ onSuccess }: Props) {
           <div className="text-3xl mb-2">📂</div>
           <div className="text-sm font-medium mb-1">Drop file CSV SP2KP di sini</div>
           <div className="text-xs" style={{ color: '#8a8580' }}>
-            atau klik untuk pilih file
+            atau klik untuk pilih file · ukuran berapapun didukung
           </div>
           <input
             ref={fileRef}
@@ -96,12 +121,8 @@ export default function CSVUploader({ onSuccess }: Props) {
         </div>
       )}
 
-      {/* File selected + preview */}
       {file && (
-        <div
-          className="rounded-lg border p-3"
-          style={{ borderColor: '#d8d4cb', background: '#fafaf8' }}
-        >
+        <div className="rounded-lg border p-3" style={{ borderColor: '#d8d4cb', background: '#fafaf8' }}>
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
               <span className="text-lg">📄</span>
@@ -113,7 +134,7 @@ export default function CSVUploader({ onSuccess }: Props) {
               </div>
             </div>
             <button
-              onClick={() => { setFile(null); setPreview(null); setResult(null) }}
+              onClick={() => { setFile(null); setParsed(null); setResult(null); setError(null) }}
               className="text-xs px-2 py-1 rounded"
               style={{ color: '#8a8580', background: '#e5e1d8' }}
             >
@@ -123,21 +144,20 @@ export default function CSVUploader({ onSuccess }: Props) {
 
           {loading && (
             <div className="text-xs text-center py-3" style={{ color: '#8a8580' }}>
-              Memproses...
+              {progress ?? 'Mem-parsing CSV...'}
             </div>
           )}
 
-          {preview && !loading && !result && (
+          {parsed && !loading && !result && (
             <>
               <div className="flex gap-3 text-xs mb-3">
-                <span>Total: <b>{preview.total}</b></span>
-                <span style={{ color: '#166534' }}>Valid: <b>{preview.valid}</b></span>
-                {preview.errors.length > 0 && (
-                  <span style={{ color: '#991b1b' }}>Error: <b>{preview.errors.length}</b></span>
+                <span>Total: <b>{parsed.total}</b></span>
+                <span style={{ color: '#166534' }}>Valid: <b>{parsed.rows.length}</b></span>
+                {parsed.errors.length > 0 && (
+                  <span style={{ color: '#991b1b' }}>Error: <b>{parsed.errors.length}</b></span>
                 )}
               </div>
 
-              {/* Preview table */}
               <div className="overflow-x-auto mb-3">
                 <table className="w-full text-xs border-collapse">
                   <thead>
@@ -148,14 +168,12 @@ export default function CSVUploader({ onSuccess }: Props) {
                     </tr>
                   </thead>
                   <tbody>
-                    {preview.preview.map((row, i) => (
+                    {parsed.rows.slice(0, 20).map((row, i) => (
                       <tr key={i} style={{ borderBottom: '1px solid #e5e1d8' }}>
                         <td className="px-2 py-1 font-mono">{row.date}</td>
                         <td className="px-2 py-1">{row.city_raw}</td>
                         <td className="px-2 py-1">{row.commodity_raw}</td>
-                        <td className="px-2 py-1 font-mono">
-                          {row.price.toLocaleString('id-ID')}
-                        </td>
+                        <td className="px-2 py-1 font-mono">{row.price.toLocaleString('id-ID')}</td>
                         <td className="px-2 py-1 font-mono">
                           {row.het_ha ? row.het_ha.toLocaleString('id-ID') : '—'}
                         </td>
@@ -163,24 +181,29 @@ export default function CSVUploader({ onSuccess }: Props) {
                     ))}
                   </tbody>
                 </table>
+                {parsed.rows.length > 20 && (
+                  <div className="text-xs text-center py-1" style={{ color: '#8a8580' }}>
+                    ... dan {parsed.rows.length - 20} baris lainnya
+                  </div>
+                )}
               </div>
 
-              {preview.errors.length > 0 && (
+              {parsed.errors.length > 0 && (
                 <div className="mb-3 p-2 rounded text-xs" style={{ background: '#fee2e2', color: '#991b1b' }}>
-                  {preview.errors.slice(0, 5).map((e, i) => <div key={i}>{e}</div>)}
+                  {parsed.errors.slice(0, 5).map((e, i) => <div key={i}>{e}</div>)}
                 </div>
               )}
 
               <button
                 onClick={handleIngest}
-                disabled={preview.valid === 0}
+                disabled={parsed.rows.length === 0}
                 className="w-full py-2 rounded-md text-sm font-medium transition-colors"
                 style={{
-                  background: preview.valid > 0 ? '#1b5e3b' : '#d8d4cb',
-                  color: preview.valid > 0 ? '#e8f3ec' : '#8a8580',
+                  background: parsed.rows.length > 0 ? '#1b5e3b' : '#d8d4cb',
+                  color: parsed.rows.length > 0 ? '#e8f3ec' : '#8a8580',
                 }}
               >
-                Upload {preview.valid.toLocaleString()} baris ke database
+                Upload {parsed.rows.length.toLocaleString('id-ID')} baris ke database
               </button>
             </>
           )}
@@ -199,7 +222,7 @@ export default function CSVUploader({ onSuccess }: Props) {
                 </div>
               )}
               <button
-                onClick={() => { setFile(null); setPreview(null); setResult(null) }}
+                onClick={() => { setFile(null); setParsed(null); setResult(null) }}
                 className="mt-2 text-xs px-2 py-1 rounded"
                 style={{ background: '#1b5e3b', color: '#e8f3ec' }}
               >
