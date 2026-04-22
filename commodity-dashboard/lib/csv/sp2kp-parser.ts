@@ -12,23 +12,30 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
     return { rows: [], errors: ['CSV kosong atau tidak valid'], total: 0 }
   }
 
-  const header = splitCSVLine(lines[0]).map((h) => h.trim().toLowerCase())
+  // Auto-detect delimiter: semicolon (Indonesian Excel) or comma
+  const firstLine = lines[0]
+  const semicolonCount = (firstLine.match(/;/g) ?? []).length
+  const commaCount = (firstLine.match(/,/g) ?? []).length
+  const delimiter = semicolonCount > commaCount ? ';' : ','
+
+  const header = splitCSVLine(lines[0], delimiter).map((h) => h.trim().toLowerCase())
 
   // Detect format: wide (tanggal sebagai kolom) vs long (ada kolom "tanggal")
   const hasDateCol = findCol(header, ['tanggal', 'date', 'tgl']) >= 0
   const dateColIndices = findDateColumns(header)
 
   if (!hasDateCol && dateColIndices.length > 0) {
-    return parseWideFormat(lines, header, dateColIndices)
+    return parseWideFormat(lines, header, dateColIndices, delimiter)
   }
-  return parseLongFormat(lines, header)
+  return parseLongFormat(lines, header, delimiter)
 }
 
 // Wide format: No | Kode Wilayah | Provinsi | Kabupaten | Komoditas | HET/HA | 2/1/2026 | 5/1/2026 | ...
 function parseWideFormat(
   lines: string[],
   header: string[],
-  dateColIndices: { col: number; date: string }[]
+  dateColIndices: { col: number; date: string }[],
+  delimiter: string
 ): ParsedCSV {
   const errors: string[] = []
   const rows: SP2KPRow[] = []
@@ -47,7 +54,7 @@ function parseWideFormat(
 
   let rowCount = 0
   for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i])
+    const cols = splitCSVLine(lines[i], delimiter)
     if (cols.length < 4) continue
 
     const cityRaw = cols[idx.city]?.trim() ?? ''
@@ -80,7 +87,7 @@ function parseWideFormat(
 }
 
 // Long format: Tanggal | Kode Wilayah | Provinsi | Kota | Komoditas | Harga | HET/HA
-function parseLongFormat(lines: string[], header: string[]): ParsedCSV {
+function parseLongFormat(lines: string[], header: string[], delimiter: string): ParsedCSV {
   const errors: string[] = []
   const rows: SP2KPRow[] = []
 
@@ -100,7 +107,7 @@ function parseLongFormat(lines: string[], header: string[]): ParsedCSV {
   if (errors.length > 0) return { rows: [], errors, total: 0 }
 
   for (let i = 1; i < lines.length; i++) {
-    const cols = splitCSVLine(lines[i])
+    const cols = splitCSVLine(lines[i], delimiter)
     if (cols.length < 4) continue
 
     const parsedDate = parseDate(cols[idx.date]?.trim() ?? '')
@@ -170,7 +177,7 @@ function parseDate(raw: string): string | null {
   return null
 }
 
-function splitCSVLine(line: string): string[] {
+function splitCSVLine(line: string, delimiter = ','): string[] {
   const result: string[] = []
   let current = ''
   let inQuotes = false
@@ -178,7 +185,7 @@ function splitCSVLine(line: string): string[] {
     const ch = line[i]
     if (ch === '"') {
       inQuotes = !inQuotes
-    } else if (ch === ',' && !inQuotes) {
+    } else if (ch === delimiter && !inQuotes) {
       result.push(current)
       current = ''
     } else {
