@@ -23,6 +23,12 @@ const NAV_ITEMS = [
     desc: 'SP2KP vs Pedagang',
   },
   {
+    label: 'Transport',
+    href: '/dashboard/transport',
+    pip: '#7c2d12',
+    desc: 'Vendor & jarak',
+  },
+  {
     label: 'Arbitrase AI',
     href: '/dashboard/arbitrase/ai',
     pip: '#7c2d12',
