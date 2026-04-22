@@ -1,14 +1,1 @@
-{
-  "builds": [
-    {
-      "src": "commodity-dashboard/package.json",
-      "use": "@vercel/next"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "commodity-dashboard/$1"
-    }
-  ]
-}
+{}
