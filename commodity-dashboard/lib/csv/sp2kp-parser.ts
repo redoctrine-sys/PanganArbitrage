@@ -7,22 +7,38 @@ export type ParsedCSV = {
 }
 
 export function parseSP2KPCSV(csvText: string): ParsedCSV {
-  const lines = csvText.split('\n').map((l) => l.trim()).filter(Boolean)
+  // Remove BOM if present
+  const text = csvText.charCodeAt(0) === 0xFEFF ? csvText.slice(1) : csvText
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
   if (lines.length < 2) {
     return { rows: [], errors: ['CSV kosong atau tidak valid'], total: 0 }
   }
 
-  // Auto-detect delimiter: semicolon (Indonesian Excel) or comma
   const firstLine = lines[0]
+
+  // Auto-detect delimiter: tab, semicolon, or comma
+  const tabCount = (firstLine.match(/\t/g) ?? []).length
   const semicolonCount = (firstLine.match(/;/g) ?? []).length
   const commaCount = (firstLine.match(/,/g) ?? []).length
-  const delimiter = semicolonCount > commaCount ? ';' : ','
+  const delimiter = tabCount > semicolonCount && tabCount > commaCount ? '\t'
+    : semicolonCount > commaCount ? ';' : ','
 
-  const header = splitCSVLine(lines[0], delimiter).map((h) => h.trim().toLowerCase())
+  const header = splitCSVLine(firstLine, delimiter).map((h) => h.trim().toLowerCase().replace(/^"|"$/g, ''))
 
   // Detect format: wide (tanggal sebagai kolom) vs long (ada kolom "tanggal")
   const hasDateCol = findCol(header, ['tanggal', 'date', 'tgl']) >= 0
   const dateColIndices = findDateColumns(header)
+
+  // Debug: if neither format detected, show diagnostic
+  if (!hasDateCol && dateColIndices.length === 0) {
+    const sample = header.slice(0, 8).join(' | ')
+    const delName = delimiter === '\t' ? 'TAB' : delimiter
+    return {
+      rows: [],
+      errors: [`Format tidak dikenali. Delimiter: "${delName}", Kolom pertama: [${sample}]`],
+      total: 0,
+    }
+  }
 
   if (!hasDateCol && dateColIndices.length > 0) {
     return parseWideFormat(lines, header, dateColIndices, delimiter)
@@ -136,14 +152,30 @@ function parseLongFormat(lines: string[], header: string[], delimiter: string): 
   return { rows, errors: errors.slice(0, 20), total: lines.length - 1 }
 }
 
-// Find columns whose header looks like a date (D/M/YYYY or similar)
+// Find columns whose header looks like a date (D/M/YYYY, YYYY-MM-DD, or Excel serial)
 function findDateColumns(header: string[]): { col: number; date: string }[] {
   const result: { col: number; date: string }[] = []
   for (let i = 0; i < header.length; i++) {
-    const d = parseDate(header[i].trim())
+    const raw = header[i].trim()
+    const d = parseDate(raw) ?? parseExcelSerial(raw)
     if (d) result.push({ col: i, date: d })
   }
   return result
+}
+
+// Excel stores dates as integers (days since Jan 0, 1900). Range 2000-2040 ≈ 36526-54787
+function parseExcelSerial(raw: string): string | null {
+  const n = parseInt(raw, 10)
+  if (isNaN(n) || raw !== String(n)) return null // must be a plain integer
+  if (n < 36526 || n > 54787) return null // outside year 2000-2040
+  // Excel epoch: Dec 30, 1899 (with leap year bug offset)
+  const ms = (n - 25569) * 86400 * 1000
+  const d = new Date(ms)
+  if (isNaN(d.getTime())) return null
+  const yyyy = d.getUTCFullYear()
+  const mm = String(d.getUTCMonth() + 1).padStart(2, '0')
+  const dd = String(d.getUTCDate()).padStart(2, '0')
+  return `${yyyy}-${mm}-${dd}`
 }
 
 function findCol(header: string[], candidates: string[]): number {
@@ -162,18 +194,24 @@ function parseDate(raw: string): string | null {
   if (!raw) return null
   // YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
-  // D/M/YYYY or DD/MM/YYYY (Indonesian: day/month/year)
-  const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
+  // D/M/YYYY or DD/MM/YYYY or D/M/YY (Indonesian: day/month/year)
+  const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/)
   if (m) {
     const day = parseInt(m[1], 10)
     const month = parseInt(m[2], 10)
-    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-      return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+    let year = parseInt(m[3], 10)
+    if (year < 100) year += 2000
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2000) {
+      return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     }
   }
   // DD-MM-YYYY
-  const m2 = raw.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
-  if (m2) return `${m2[3]}-${m2[2].padStart(2, '0')}-${m2[1].padStart(2, '0')}`
+  const m2 = raw.match(/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/)
+  if (m2) {
+    let year = parseInt(m2[3], 10)
+    if (year < 100) year += 2000
+    return `${year}-${m2[2].padStart(2, '0')}-${m2[1].padStart(2, '0')}`
+  }
   return null
 }
 
