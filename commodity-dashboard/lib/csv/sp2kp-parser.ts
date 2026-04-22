@@ -1,9 +1,5 @@
 import type { SP2KPRow } from '@/types/prices'
 
-// SP2KP CSV format:
-// Tanggal, Kode Wilayah, Provinsi, Kota/Kabupaten, Nama Komoditas, Harga, HET/HA
-// Date can be DD/MM/YYYY or YYYY-MM-DD
-
 export type ParsedCSV = {
   rows: SP2KPRow[]
   errors: string[]
@@ -16,15 +12,81 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
     return { rows: [], errors: ['CSV kosong atau tidak valid'], total: 0 }
   }
 
-  const header = lines[0].split(',').map((h) => h.trim().toLowerCase())
+  const header = splitCSVLine(lines[0]).map((h) => h.trim().toLowerCase())
+
+  // Detect format: wide (tanggal sebagai kolom) vs long (ada kolom "tanggal")
+  const hasDateCol = findCol(header, ['tanggal', 'date', 'tgl']) >= 0
+  const dateColIndices = findDateColumns(header)
+
+  if (!hasDateCol && dateColIndices.length > 0) {
+    return parseWideFormat(lines, header, dateColIndices)
+  }
+  return parseLongFormat(lines, header)
+}
+
+// Wide format: No | Kode Wilayah | Provinsi | Kabupaten | Komoditas | HET/HA | 2/1/2026 | 5/1/2026 | ...
+function parseWideFormat(
+  lines: string[],
+  header: string[],
+  dateColIndices: { col: number; date: string }[]
+): ParsedCSV {
   const errors: string[] = []
   const rows: SP2KPRow[] = []
 
-  // Detect column indices
+  const idx = {
+    kode: findCol(header, ['kode wilayah', 'kode_wilayah', 'kode']),
+    province: findCol(header, ['provinsi', 'province', 'prov']),
+    city: findCol(header, ['kabupaten', 'kota/kabupaten', 'kota', 'city', 'nama kota']),
+    commodity: findCol(header, ['komoditas', 'nama komoditas', 'commodity', 'nama komoditi']),
+    het: findCol(header, ['het/ha', 'het', 'ha', 'het (rp)']),
+  }
+
+  if (idx.city < 0) errors.push('Kolom kabupaten/kota tidak ditemukan')
+  if (idx.commodity < 0) errors.push('Kolom komoditas tidak ditemukan')
+  if (errors.length > 0) return { rows: [], errors, total: 0 }
+
+  let rowCount = 0
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCSVLine(lines[i])
+    if (cols.length < 4) continue
+
+    const cityRaw = cols[idx.city]?.trim() ?? ''
+    const commodityRaw = cols[idx.commodity]?.trim() ?? ''
+    if (!cityRaw || !commodityRaw) continue
+
+    const kode = idx.kode >= 0 ? cols[idx.kode]?.trim() || null : null
+
+    const rawHet = idx.het >= 0 ? cleanNumber(cols[idx.het]) : ''
+    const het = rawHet ? parseFloat(rawHet) : null
+
+    for (const { col, date } of dateColIndices) {
+      const rawPrice = cleanNumber(cols[col] ?? '')
+      const price = parseFloat(rawPrice)
+      if (!rawPrice || isNaN(price) || price <= 0) continue
+
+      rowCount++
+      rows.push({
+        date,
+        city_raw: cityRaw,
+        commodity_raw: commodityRaw,
+        price,
+        het_ha: het && !isNaN(het) && het > 0 ? het : null,
+        kode_wilayah: kode,
+      })
+    }
+  }
+
+  return { rows, errors: errors.slice(0, 20), total: rowCount }
+}
+
+// Long format: Tanggal | Kode Wilayah | Provinsi | Kota | Komoditas | Harga | HET/HA
+function parseLongFormat(lines: string[], header: string[]): ParsedCSV {
+  const errors: string[] = []
+  const rows: SP2KPRow[] = []
+
   const idx = {
     date: findCol(header, ['tanggal', 'date', 'tgl']),
     kode: findCol(header, ['kode wilayah', 'kode_wilayah', 'kode']),
-    province: findCol(header, ['provinsi', 'province', 'prov']),
     city: findCol(header, ['kota/kabupaten', 'kota', 'kabupaten', 'city', 'nama kota']),
     commodity: findCol(header, ['nama komoditas', 'komoditas', 'commodity', 'nama komoditi']),
     price: findCol(header, ['harga', 'price', 'harga (rp)', 'harga rp']),
@@ -41,21 +103,17 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
     const cols = splitCSVLine(lines[i])
     if (cols.length < 4) continue
 
-    const rawDate = cols[idx.date]?.trim() ?? ''
-    const parsedDate = parseDate(rawDate)
+    const parsedDate = parseDate(cols[idx.date]?.trim() ?? '')
     if (!parsedDate) {
-      errors.push(`Baris ${i + 1}: format tanggal tidak valid "${rawDate}"`)
+      errors.push(`Baris ${i + 1}: format tanggal tidak valid`)
       continue
     }
 
-    const rawPrice = cols[idx.price]?.trim().replace(/[^0-9.,-]/g, '').replace(',', '') ?? ''
+    const rawPrice = cleanNumber(cols[idx.price] ?? '')
     const price = parseFloat(rawPrice)
-    if (isNaN(price) || price <= 0) {
-      errors.push(`Baris ${i + 1}: harga tidak valid "${cols[idx.price]}"`)
-      continue
-    }
+    if (!rawPrice || isNaN(price) || price <= 0) continue
 
-    const rawHet = idx.het >= 0 ? cols[idx.het]?.trim().replace(/[^0-9.,-]/g, '').replace(',', '') : ''
+    const rawHet = idx.het >= 0 ? cleanNumber(cols[idx.het] ?? '') : ''
     const het = rawHet ? parseFloat(rawHet) : null
 
     rows.push({
@@ -71,6 +129,16 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
   return { rows, errors: errors.slice(0, 20), total: lines.length - 1 }
 }
 
+// Find columns whose header looks like a date (D/M/YYYY or similar)
+function findDateColumns(header: string[]): { col: number; date: string }[] {
+  const result: { col: number; date: string }[] = []
+  for (let i = 0; i < header.length; i++) {
+    const d = parseDate(header[i].trim())
+    if (d) result.push({ col: i, date: d })
+  }
+  return result
+}
+
 function findCol(header: string[], candidates: string[]): number {
   for (const c of candidates) {
     const idx = header.findIndex((h) => h.includes(c))
@@ -79,13 +147,23 @@ function findCol(header: string[], candidates: string[]): number {
   return -1
 }
 
+function cleanNumber(raw: string): string {
+  return raw.trim().replace(/[^0-9.,-]/g, '').replace(',', '.')
+}
+
 function parseDate(raw: string): string | null {
   if (!raw) return null
   // YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw
-  // DD/MM/YYYY
+  // D/M/YYYY or DD/MM/YYYY (Indonesian: day/month/year)
   const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/)
-  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+  if (m) {
+    const day = parseInt(m[1], 10)
+    const month = parseInt(m[2], 10)
+    if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+      return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`
+    }
+  }
   // DD-MM-YYYY
   const m2 = raw.match(/^(\d{1,2})-(\d{1,2})-(\d{4})$/)
   if (m2) return `${m2[3]}-${m2[2].padStart(2, '0')}-${m2[1].padStart(2, '0')}`
