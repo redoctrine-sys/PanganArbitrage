@@ -1,0 +1,7 @@
+{
+  "buildCommand": "cd commodity-dashboard && npm install && npm run build",
+  "outputDirectory": "commodity-dashboard/.next",
+  "installCommand": "echo skip",
+  "framework": "nextjs",
+  "rootDirectory": "commodity-dashboard"
+}
