@@ -4,21 +4,32 @@ import type { SP2KPRow } from '@/types/prices'
 // Tanggal, Kode Wilayah, Provinsi, Kota/Kabupaten, Nama Komoditas, Harga, HET/HA
 // Date can be DD/MM/YYYY or YYYY-MM-DD
 
+// BPS province codes for target scope: Jawa, Bali, NTB
+const ALLOWED_KODE_PREFIXES = new Set(['31', '32', '33', '34', '35', '36', '51', '52'])
+
+const ALLOWED_PROVINCE_KEYWORDS = [
+  'jawa barat', 'jabar', 'jawa tengah', 'jateng', 'jawa timur', 'jatim',
+  'banten', 'di yogyakarta', 'yogyakarta', 'diy', 'dki jakarta', 'jakarta',
+  'bali', 'nusa tenggara barat', 'ntb',
+]
+
 export type ParsedCSV = {
   rows: SP2KPRow[]
   errors: string[]
   total: number
+  filteredOut: number
 }
 
 export function parseSP2KPCSV(csvText: string): ParsedCSV {
   const lines = csvText.split('\n').map((l) => l.trim()).filter(Boolean)
   if (lines.length < 2) {
-    return { rows: [], errors: ['CSV kosong atau tidak valid'], total: 0 }
+    return { rows: [], errors: ['CSV kosong atau tidak valid'], total: 0, filteredOut: 0 }
   }
 
   const header = lines[0].split(',').map((h) => h.trim().toLowerCase())
   const errors: string[] = []
   const rows: SP2KPRow[] = []
+  let filteredOut = 0
 
   // Detect column indices
   const idx = {
@@ -35,11 +46,19 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
   if (idx.city < 0) errors.push('Kolom kota tidak ditemukan')
   if (idx.commodity < 0) errors.push('Kolom komoditas tidak ditemukan')
   if (idx.price < 0) errors.push('Kolom harga tidak ditemukan')
-  if (errors.length > 0) return { rows: [], errors, total: 0 }
+  if (errors.length > 0) return { rows: [], errors, total: 0, filteredOut: 0 }
 
   for (let i = 1; i < lines.length; i++) {
     const cols = splitCSVLine(lines[i])
     if (cols.length < 4) continue
+
+    // Province scope filter
+    const kodePrefix = idx.kode >= 0 ? (cols[idx.kode]?.trim() ?? '').slice(0, 2) : ''
+    const provinceRaw = idx.province >= 0 ? (cols[idx.province]?.trim().toLowerCase() ?? '') : ''
+    const inScope = kodePrefix
+      ? ALLOWED_KODE_PREFIXES.has(kodePrefix)
+      : ALLOWED_PROVINCE_KEYWORDS.some((kw) => provinceRaw.includes(kw))
+    if (!inScope) { filteredOut++; continue }
 
     const rawDate = cols[idx.date]?.trim() ?? ''
     const parsedDate = parseDate(rawDate)
@@ -68,7 +87,7 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
     })
   }
 
-  return { rows, errors: errors.slice(0, 20), total: lines.length - 1 }
+  return { rows, errors: errors.slice(0, 20), total: lines.length - 1, filteredOut }
 }
 
 function findCol(header: string[], candidates: string[]): number {

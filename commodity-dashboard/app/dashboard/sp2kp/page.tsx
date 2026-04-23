@@ -33,7 +33,6 @@ export default function SP2KPPage() {
   const [loading, setLoading] = useState(true)
   const [expandedCities, setExpandedCities] = useState<Set<string>>(new Set())
   const [expandedComms, setExpandedComms] = useState<Set<string>>(new Set())
-  const [filterIsland, setFilterIsland] = useState('')
   const [filterComm, setFilterComm] = useState('')
   const [search, setSearch] = useState('')
 
@@ -41,7 +40,7 @@ export default function SP2KPPage() {
     setLoading(true)
     try {
       const [citiesRes, commsRes, statsRes] = await Promise.all([
-        supabase.from('cities').select('id, name, province').order('name'),
+        supabase.from('cities').select('id, name, province').in('island', ['Jawa', 'Madura', 'Bali', 'Lombok']).order('name'),
         supabase.from('commodities').select('id, name, category, unit').eq('is_sp2kp', true).order('name'),
         // Get stats
         Promise.all([
@@ -292,20 +291,37 @@ export default function SP2KPPage() {
                 Memuat data...
               </div>
             ) : filteredGrouped.length === 0 ? (
-              <EmptyState
-                icon="📭"
-                title="Belum ada data SP2KP"
-                desc="Upload CSV untuk memulai"
-                action={
-                  <button
-                    onClick={() => setActiveTab('upload')}
-                    className="px-3 py-1.5 rounded-md text-xs font-medium"
-                    style={{ background: '#1b5e3b', color: '#e8f3ec' }}
-                  >
-                    Upload CSV
-                  </button>
-                }
-              />
+              stats.totalRows > 0 ? (
+                <EmptyState
+                  icon="⏳"
+                  title="Data tersimpan, menunggu review"
+                  desc={`${stats.pendingCities.toLocaleString()} kota dan ${stats.pendingComms.toLocaleString()} komoditas belum disetujui Naming Agent`}
+                  action={
+                    <a
+                      href="/dashboard/admin/naming"
+                      className="px-3 py-1.5 rounded-md text-xs font-medium inline-block"
+                      style={{ background: '#1b5e3b', color: '#e8f3ec' }}
+                    >
+                      Buka Naming Agent →
+                    </a>
+                  }
+                />
+              ) : (
+                <EmptyState
+                  icon="📭"
+                  title="Belum ada data SP2KP"
+                  desc="Upload CSV untuk memulai"
+                  action={
+                    <button
+                      onClick={() => setActiveTab('upload')}
+                      className="px-3 py-1.5 rounded-md text-xs font-medium"
+                      style={{ background: '#1b5e3b', color: '#e8f3ec' }}
+                    >
+                      Upload CSV
+                    </button>
+                  }
+                />
+              )
             ) : (
               <div className="divide-y" style={{ borderColor: '#d8d4cb' }}>
                 {filteredGrouped.map((group) => {
