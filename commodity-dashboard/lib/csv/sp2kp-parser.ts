@@ -1,9 +1,20 @@
 import type { SP2KPRow } from '@/types/prices'
 
+// BPS province codes for target scope: Jawa, Bali, NTB
+const ALLOWED_KODE_PREFIXES = new Set(['31', '32', '33', '34', '35', '36', '51', '52'])
+
+const ALLOWED_PROVINCE_KEYWORDS = [
+  'jawa barat', 'jabar', 'jawa tengah', 'jateng', 'jawa timur', 'jatim',
+  'banten', 'di yogyakarta', 'yogyakarta', 'diy', 'dki jakarta', 'jakarta',
+  'bali', 'nusa tenggara barat', 'ntb',
+]
+
+
 export type ParsedCSV = {
   rows: SP2KPRow[]
   errors: string[]
   total: number
+  filteredOut: number
 }
 
 export function parseSP2KPCSV(csvText: string): ParsedCSV {
@@ -11,7 +22,7 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
   const text = csvText.charCodeAt(0) === 0xFEFF ? csvText.slice(1) : csvText
   const lines = text.split('\n').map((l) => l.trim()).filter(Boolean)
   if (lines.length < 2) {
-    return { rows: [], errors: ['CSV kosong atau tidak valid'], total: 0 }
+    return { rows: [], errors: ['CSV kosong atau tidak valid'], total: 0, filteredOut: 0 }
   }
 
   const firstLine = lines[0]
@@ -66,7 +77,7 @@ function parseWideFormat(
 
   if (idx.city < 0) errors.push('Kolom kabupaten/kota tidak ditemukan')
   if (idx.commodity < 0) errors.push('Kolom komoditas tidak ditemukan')
-  if (errors.length > 0) return { rows: [], errors, total: 0 }
+  if (errors.length > 0) return { rows: [], errors, total: 0, filteredOut: 0 }
 
   let rowCount = 0
   for (let i = 1; i < lines.length; i++) {
@@ -99,17 +110,19 @@ function parseWideFormat(
     }
   }
 
-  return { rows, errors: errors.slice(0, 20), total: rowCount }
+  return { rows, errors: errors.slice(0, 20), total: rowCount, filteredOut: 0 }
 }
 
 // Long format: Tanggal | Kode Wilayah | Provinsi | Kota | Komoditas | Harga | HET/HA
 function parseLongFormat(lines: string[], header: string[], delimiter: string): ParsedCSV {
   const errors: string[] = []
   const rows: SP2KPRow[] = []
+  let filteredOut = 0
 
   const idx = {
     date: findCol(header, ['tanggal', 'date', 'tgl']),
     kode: findCol(header, ['kode wilayah', 'kode_wilayah', 'kode']),
+    province: findCol(header, ['provinsi', 'province', 'prov']),
     city: findCol(header, ['kota/kabupaten', 'kota', 'kabupaten', 'city', 'nama kota']),
     commodity: findCol(header, ['nama komoditas', 'komoditas', 'commodity', 'nama komoditi']),
     price: findCol(header, ['harga', 'price', 'harga (rp)', 'harga rp']),
@@ -120,11 +133,19 @@ function parseLongFormat(lines: string[], header: string[], delimiter: string): 
   if (idx.city < 0) errors.push('Kolom kota tidak ditemukan')
   if (idx.commodity < 0) errors.push('Kolom komoditas tidak ditemukan')
   if (idx.price < 0) errors.push('Kolom harga tidak ditemukan')
-  if (errors.length > 0) return { rows: [], errors, total: 0 }
+  if (errors.length > 0) return { rows: [], errors, total: 0, filteredOut: 0 }
 
   for (let i = 1; i < lines.length; i++) {
     const cols = splitCSVLine(lines[i], delimiter)
     if (cols.length < 4) continue
+
+    // Province scope filter
+    const kodePrefix = idx.kode >= 0 ? (cols[idx.kode]?.trim() ?? '').slice(0, 2) : ''
+    const provinceRaw = idx.province >= 0 ? (cols[idx.province]?.trim().toLowerCase() ?? '') : ''
+    const inScope = kodePrefix
+      ? ALLOWED_KODE_PREFIXES.has(kodePrefix)
+      : ALLOWED_PROVINCE_KEYWORDS.some((kw) => provinceRaw.includes(kw))
+    if (!inScope) { filteredOut++; continue }
 
     const parsedDate = parseDate(cols[idx.date]?.trim() ?? '')
     if (!parsedDate) {
@@ -149,7 +170,7 @@ function parseLongFormat(lines: string[], header: string[], delimiter: string): 
     })
   }
 
-  return { rows, errors: errors.slice(0, 20), total: lines.length - 1 }
+  return { rows, errors: errors.slice(0, 20), total: lines.length - 1, filteredOut }
 }
 
 // Find columns whose header looks like a date (D/M/YYYY, YYYY-MM-DD, or Excel serial)

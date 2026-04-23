@@ -11,7 +11,7 @@ type Props = {
 
 export default function CSVUploader({ onSuccess }: Props) {
   const [file, setFile] = useState<File | null>(null)
-  const [parsed, setParsed] = useState<{ rows: SP2KPRow[]; errors: string[]; total: number } | null>(null)
+  const [parsed, setParsed] = useState<{ rows: SP2KPRow[]; errors: string[]; total: number; filteredOut: number } | null>(null)
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState<string | null>(null)
   const [result, setResult] = useState<IngestResult | null>(null)
@@ -150,9 +150,12 @@ export default function CSVUploader({ onSuccess }: Props) {
 
           {parsed && !loading && !result && (
             <>
-              <div className="flex gap-3 text-xs mb-3">
+              <div className="flex gap-3 text-xs mb-3 flex-wrap">
                 <span>Total: <b>{parsed.total}</b></span>
                 <span style={{ color: '#166534' }}>Valid: <b>{parsed.rows.length}</b></span>
+                {parsed.filteredOut > 0 && (
+                  <span style={{ color: '#92400e' }}>Di luar cakupan: <b>{parsed.filteredOut}</b></span>
+                )}
                 {parsed.errors.length > 0 && (
                   <span style={{ color: '#991b1b' }}>Error: <b>{parsed.errors.length}</b></span>
                 )}

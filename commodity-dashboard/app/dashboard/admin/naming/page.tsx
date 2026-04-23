@@ -50,11 +50,11 @@ export default function AdminNamingPage() {
     }
   }
 
-  async function handleApprove(id: string, canonicalId: string, note?: string) {
+  async function handleApprove(id: string, canonicalId: string, overrideName?: string) {
     await fetch('/api/admin/naming/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, canonical_id: canonicalId, note }),
+      body: JSON.stringify({ id, canonical_id: canonicalId, override_name: overrideName }),
     })
     await loadItems()
   }

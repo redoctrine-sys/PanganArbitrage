@@ -139,6 +139,7 @@ export default function PedagangPage() {
             <div className="text-sm font-medium mb-4">Tambah Pedagang Baru</div>
             <PedagangForm
               cities={cities}
+              commodities={commodities}
               onSuccess={() => {
                 loadData()
                 setTab('list')

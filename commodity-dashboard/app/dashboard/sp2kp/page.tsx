@@ -8,106 +8,104 @@ import PriceChart from '@/components/chart/PriceChart'
 import CSVUploader from '@/components/csv/CSVUploader'
 import EmptyState from '@/components/shared/EmptyState'
 
-type City = { id: string; name: string; province: string | null }
-type Commodity = { id: string; name: string; category: string | null; unit: string }
-type PriceRow = { date: string; price: number; het_ha: number | null; city_raw: string; commodity_raw: string }
-type Stats = { totalRows: number; lastDate: string | null; pendingCities: number; pendingComms: number }
+type Stats = { totalRows: number; lastDate: string | null; pendingNaming: number; kotaCount: number }
 
-type GroupedData = {
-  city: City
-  commodities: {
-    commodity: Commodity
-    latestPrice: number | null
-    latestDate: string | null
-    het: number | null
-    history: { date: string; price: number; het_ha: number | null }[]
-  }[]
-}[]
+type CommEntry = {
+  commRaw: string
+  latestPrice: number
+  latestDate: string
+  het: number | null
+  history: { date: string; price: number; het_ha: number | null }[]
+}
+
+type CityEntry = {
+  cityRaw: string
+  commodities: CommEntry[]
+}
 
 export default function SP2KPPage() {
   const [activeTab, setActiveTab] = useState<'data' | 'upload'>('data')
-  const [cities, setCities] = useState<City[]>([])
-  const [commodities, setCommodities] = useState<Commodity[]>([])
-  const [stats, setStats] = useState<Stats>({ totalRows: 0, lastDate: null, pendingCities: 0, pendingComms: 0 })
-  const [grouped, setGrouped] = useState<GroupedData>([])
+  const [grouped, setGrouped] = useState<CityEntry[]>([])
+  const [stats, setStats] = useState<Stats>({ totalRows: 0, lastDate: null, pendingNaming: 0, kotaCount: 0 })
+  const [allComms, setAllComms] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [expandedCities, setExpandedCities] = useState<Set<string>>(new Set())
   const [expandedComms, setExpandedComms] = useState<Set<string>>(new Set())
-  const [filterIsland, setFilterIsland] = useState('')
   const [filterComm, setFilterComm] = useState('')
   const [search, setSearch] = useState('')
 
   const loadData = useCallback(async () => {
     setLoading(true)
     try {
-      const [citiesRes, commsRes, statsRes] = await Promise.all([
-        supabase.from('cities').select('id, name, province').order('name'),
-        supabase.from('commodities').select('id, name, category, unit').eq('is_sp2kp', true).order('name'),
-        // Get stats
-        Promise.all([
-          supabase.from('prices_raw').select('*', { count: 'exact', head: true }).eq('source', 'sp2kp'),
-          supabase.from('prices_raw').select('date').eq('source', 'sp2kp').not('city_id', 'is', null).order('date', { ascending: false }).limit(1),
-          supabase.from('prices_raw').select('*', { count: 'exact', head: true }).eq('source', 'sp2kp').is('city_id', null),
-          supabase.from('prices_raw').select('*', { count: 'exact', head: true }).eq('source', 'sp2kp').is('commodity_id', null),
-        ])
+      const dateFrom = new Date()
+      dateFrom.setDate(dateFrom.getDate() - 30)
+
+      const [pricesRes, totalRes, lastRes, pendingRes] = await Promise.all([
+        supabase
+          .from('prices_raw')
+          .select('city_raw, commodity_raw, date, price, het_ha')
+          .eq('source', 'sp2kp')
+          .gte('date', dateFrom.toISOString().split('T')[0])
+          .order('date', { ascending: false })
+          .limit(25000),
+        supabase.from('prices_raw').select('*', { count: 'exact', head: true }).eq('source', 'sp2kp'),
+        supabase.from('prices_raw').select('date').eq('source', 'sp2kp').order('date', { ascending: false }).limit(1),
+        supabase.from('naming_queue').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
       ])
 
-      const [totalRes, lastRes, pendCityRes, pendCommRes] = statsRes
+      const prices = pricesRes.data ?? []
 
-      setCities(citiesRes.data ?? [])
-      setCommodities(commsRes.data ?? [])
+      // Group: city_raw → commodity_raw → { latest + history }
+      const cityMap = new Map<string, Map<string, {
+        latestPrice: number
+        latestDate: string
+        het: number | null
+        history: { date: string; price: number; het_ha: number | null }[]
+      }>>()
+
+      for (const row of prices) {
+        if (!row.city_raw || !row.commodity_raw) continue
+        if (!cityMap.has(row.city_raw)) cityMap.set(row.city_raw, new Map())
+        const commMap = cityMap.get(row.city_raw)!
+        if (!commMap.has(row.commodity_raw)) {
+          commMap.set(row.commodity_raw, {
+            latestPrice: row.price,
+            latestDate: row.date,
+            het: row.het_ha,
+            history: [],
+          })
+        }
+        commMap.get(row.commodity_raw)!.history.push({ date: row.date, price: row.price, het_ha: row.het_ha })
+      }
+
+      const result: CityEntry[] = [...cityMap.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0], 'id'))
+        .map(([cityRaw, commMap]) => ({
+          cityRaw,
+          commodities: [...commMap.entries()]
+            .sort((a, b) => a[0].localeCompare(b[0], 'id'))
+            .map(([commRaw, data]) => ({
+              commRaw,
+              latestPrice: data.latestPrice,
+              latestDate: data.latestDate,
+              het: data.het,
+              history: data.history.slice(0, 60).reverse(),
+            })),
+        }))
+
+      const commSet = new Set<string>()
+      for (const city of result) {
+        for (const c of city.commodities) commSet.add(c.commRaw)
+      }
+
+      setGrouped(result)
+      setAllComms([...commSet].sort((a, b) => a.localeCompare(b, 'id')))
       setStats({
         totalRows: totalRes.count ?? 0,
         lastDate: lastRes.data?.[0]?.date ?? null,
-        pendingCities: pendCityRes.count ?? 0,
-        pendingComms: pendCommRes.count ?? 0,
+        pendingNaming: pendingRes.count ?? 0,
+        kotaCount: cityMap.size,
       })
-
-      // Load latest prices grouped by city + commodity
-      const { data: prices } = await supabase
-        .from('prices_raw')
-        .select('city_id, commodity_id, date, price, het_ha')
-        .eq('source', 'sp2kp')
-        .not('city_id', 'is', null)
-        .not('commodity_id', 'is', null)
-        .order('date', { ascending: false })
-
-      if (prices && citiesRes.data && commsRes.data) {
-        // Group: city → commodity → latest price
-        const grouped: Map<string, Map<string, { latest: typeof prices[0]; history: typeof prices }>> = new Map()
-
-        for (const row of prices) {
-          if (!row.city_id || !row.commodity_id) continue
-          if (!grouped.has(row.city_id)) grouped.set(row.city_id, new Map())
-          const cityMap = grouped.get(row.city_id)!
-          if (!cityMap.has(row.commodity_id)) {
-            cityMap.set(row.commodity_id, { latest: row, history: [] })
-          }
-          cityMap.get(row.commodity_id)!.history.push(row)
-        }
-
-        const result: GroupedData = []
-        for (const city of citiesRes.data) {
-          const cityMap = grouped.get(city.id)
-          if (!cityMap) continue
-          const commRows: GroupedData[0]['commodities'] = []
-          for (const comm of commsRes.data) {
-            const entry = cityMap.get(comm.id)
-            if (!entry) continue
-            commRows.push({
-              commodity: comm,
-              latestPrice: entry.latest.price,
-              latestDate: entry.latest.date,
-              het: entry.latest.het_ha,
-              history: entry.history.slice(0, 60).reverse(),
-            })
-          }
-          if (commRows.length > 0) {
-            result.push({ city, commodities: commRows })
-          }
-        }
-        setGrouped(result)
-      }
     } finally {
       setLoading(false)
     }
@@ -115,21 +113,19 @@ export default function SP2KPPage() {
 
   useEffect(() => { loadData() }, [loadData])
 
-  const filteredGrouped = grouped.filter((g) => {
-    if (search && !g.city.name.toLowerCase().includes(search.toLowerCase())) return false
-    return true
-  }).map((g) => ({
-    ...g,
-    commodities: g.commodities.filter((c) =>
-      !filterComm || c.commodity.id === filterComm
-    ),
-  })).filter((g) => g.commodities.length > 0)
+  const filteredGrouped = grouped
+    .filter((g) => !search || g.cityRaw.toLowerCase().includes(search.toLowerCase()))
+    .map((g) => ({
+      ...g,
+      commodities: g.commodities.filter((c) => !filterComm || c.commRaw === filterComm),
+    }))
+    .filter((g) => g.commodities.length > 0)
 
-  function toggleCity(id: string) {
+  function toggleCity(key: string) {
     setExpandedCities((prev) => {
       const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
@@ -146,56 +142,31 @@ export default function SP2KPPage() {
   return (
     <div className="flex flex-col h-full overflow-hidden">
       {/* Header */}
-      <div
-        className="px-4 py-3 flex-shrink-0"
-        style={{ background: '#f0ece4', borderBottom: '2px solid #d8d4cb' }}
-      >
+      <div className="px-4 py-3 flex-shrink-0" style={{ background: '#f0ece4', borderBottom: '2px solid #d8d4cb' }}>
         <div className="flex items-center gap-2 mb-2">
           <div className="w-1 h-5 rounded-sm" style={{ background: '#1b5e3b' }} />
-          <h1 className="text-base font-bold" style={{ fontFamily: 'Georgia, serif' }}>
-            Data SP2KP
-          </h1>
-          <span
-            className="text-xs px-2 py-0.5 rounded font-mono ml-1"
-            style={{ background: '#e8f3ec', color: '#1b5e3b' }}
-          >
-            Resmi
-          </span>
+          <h1 className="text-base font-bold" style={{ fontFamily: 'Georgia, serif' }}>Data SP2KP</h1>
+          <span className="text-xs px-2 py-0.5 rounded font-mono ml-1" style={{ background: '#e8f3ec', color: '#1b5e3b' }}>Resmi</span>
         </div>
 
         {/* Stats */}
         <div className="flex gap-2 mb-3">
           {[
-            { label: 'Total Baris', value: stats.totalRows.toLocaleString('id-ID'), sub: 'harga' },
+            { label: 'Total Baris', value: stats.totalRows.toLocaleString('id-ID'), sub: 'semua tanggal' },
+            { label: 'Kab/Kota', value: stats.kotaCount.toLocaleString(), sub: '30 hari terakhir' },
             { label: 'Update Terakhir', value: stats.lastDate ? formatDate(stats.lastDate) : '—', sub: '' },
             {
-              label: 'Pending Kota',
-              value: stats.pendingCities.toLocaleString(),
-              sub: 'belum review',
-              warn: stats.pendingCities > 0,
-            },
-            {
-              label: 'Pending Komoditas',
-              value: stats.pendingComms.toLocaleString(),
-              sub: 'belum review',
-              warn: stats.pendingComms > 0,
+              label: 'Pending Naming',
+              value: stats.pendingNaming.toLocaleString(),
+              sub: 'untuk komparasi',
+              warn: stats.pendingNaming > 0,
             },
           ].map((s) => (
-            <div
-              key={s.label}
-              className="flex-1 rounded-lg px-3 py-2"
-              style={{ background: '#f5f1ea', border: '1px solid #d8d4cb' }}
-            >
-              <div
-                className="text-xs font-mono font-semibold uppercase tracking-wide mb-1"
-                style={{ color: '#8a8580', letterSpacing: '0.9px' }}
-              >
+            <div key={s.label} className="flex-1 rounded-lg px-3 py-2" style={{ background: '#f5f1ea', border: '1px solid #d8d4cb' }}>
+              <div className="text-xs font-mono font-semibold uppercase tracking-wide mb-1" style={{ color: '#8a8580', letterSpacing: '0.9px' }}>
                 {s.label}
               </div>
-              <div
-                className="text-lg font-bold"
-                style={{ color: (s as any).warn ? '#991b1b' : '#1a1612', fontFamily: 'Georgia, serif' }}
-              >
+              <div className="text-lg font-bold" style={{ color: (s as any).warn ? '#b45309' : '#1a1612', fontFamily: 'Georgia, serif' }}>
                 {s.value}
               </div>
               {s.sub && <div className="text-xs" style={{ color: '#8a8580' }}>{s.sub}</div>}
@@ -205,10 +176,7 @@ export default function SP2KPPage() {
 
         {/* Sub-tabs */}
         <div className="flex gap-1">
-          {[
-            { id: 'data', label: 'Data & Chart' },
-            { id: 'upload', label: 'Upload CSV' },
-          ].map((t) => (
+          {[{ id: 'data', label: 'Data & Chart' }, { id: 'upload', label: 'Upload CSV' }].map((t) => (
             <button
               key={t.id}
               onClick={() => setActiveTab(t.id as any)}
@@ -234,7 +202,7 @@ export default function SP2KPPage() {
             <div className="text-xs mb-4" style={{ color: '#8a8580' }}>
               Format: Tanggal, Kode Wilayah, Provinsi, Kota/Kabupaten, Nama Komoditas, Harga, HET/HA
             </div>
-            <CSVUploader onSuccess={() => loadData()} />
+            <CSVUploader onSuccess={() => { loadData(); setActiveTab('data') }} />
           </div>
         ) : (
           <>
@@ -264,15 +232,11 @@ export default function SP2KPPage() {
                 style={{ background: '#f5f1ea', border: '1px solid #d8d4cb', color: '#4a4540' }}
               >
                 <option value="">Semua komoditas</option>
-                {commodities.map((c) => (
-                  <option key={c.id} value={c.id}>{c.name}</option>
-                ))}
+                {allComms.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
 
               <button
-                onClick={() => {
-                  setExpandedCities(new Set(filteredGrouped.map((g) => g.city.id)))
-                }}
+                onClick={() => setExpandedCities(new Set(filteredGrouped.map((g) => g.cityRaw)))}
                 className="px-2 py-1 rounded-md text-xs"
                 style={{ background: '#f5f1ea', border: '1px solid #d8d4cb', color: '#4a4540' }}
               >
@@ -285,6 +249,10 @@ export default function SP2KPPage() {
               >
                 Tutup Semua
               </button>
+
+              <span className="text-xs ml-auto font-mono" style={{ color: '#8a8580' }}>
+                {filteredGrouped.length} kota
+              </span>
             </div>
 
             {loading ? (
@@ -309,28 +277,20 @@ export default function SP2KPPage() {
             ) : (
               <div className="divide-y" style={{ borderColor: '#d8d4cb' }}>
                 {filteredGrouped.map((group) => {
-                  const cityOpen = expandedCities.has(group.city.id)
+                  const cityOpen = expandedCities.has(group.cityRaw)
                   return (
-                    <div key={group.city.id}>
+                    <div key={group.cityRaw}>
                       {/* City row (Level 1) */}
                       <button
                         className="w-full flex items-center gap-2 px-4 py-2.5 text-left hover:bg-[#f0ece4] transition-colors"
-                        onClick={() => toggleCity(group.city.id)}
+                        onClick={() => toggleCity(group.cityRaw)}
                       >
                         <span
-                          className="text-xs transition-transform"
-                          style={{ color: '#8a8580', transform: cityOpen ? 'rotate(90deg)' : 'none' }}
-                        >
-                          ▶
-                        </span>
-                        <span className="font-semibold text-sm flex-1">{group.city.name}</span>
-                        <span className="text-xs" style={{ color: '#8a8580' }}>
-                          {group.city.province}
-                        </span>
-                        <span
-                          className="text-xs px-1.5 py-0.5 rounded font-mono"
-                          style={{ background: '#e5e1d8', color: '#4a4540' }}
-                        >
+                          className="text-xs flex-shrink-0"
+                          style={{ color: '#8a8580', transform: cityOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', display: 'inline-block' }}
+                        >▶</span>
+                        <span className="font-semibold text-sm flex-1">{group.cityRaw}</span>
+                        <span className="text-xs px-1.5 py-0.5 rounded font-mono" style={{ background: '#e5e1d8', color: '#4a4540' }}>
                           {group.commodities.length} komoditas
                         </span>
                       </button>
@@ -339,75 +299,43 @@ export default function SP2KPPage() {
                       {cityOpen && (
                         <div style={{ background: '#fafaf8' }}>
                           {group.commodities.map((entry) => {
-                            const commKey = `${group.city.id}-${entry.commodity.id}`
+                            const commKey = `${group.cityRaw}||${entry.commRaw}`
                             const commOpen = expandedComms.has(commKey)
                             return (
-                              <div key={entry.commodity.id} style={{ borderTop: '1px solid #e5e1d8' }}>
+                              <div key={entry.commRaw} style={{ borderTop: '1px solid #e5e1d8' }}>
                                 <button
                                   className="w-full flex items-center gap-2 px-6 py-2 text-left hover:bg-[#f0ece4] transition-colors"
                                   onClick={() => toggleComm(commKey)}
                                 >
                                   <span
-                                    className="text-xs transition-transform flex-shrink-0"
-                                    style={{
-                                      color: '#8a8580',
-                                      transform: commOpen ? 'rotate(90deg)' : 'none',
-                                    }}
-                                  >
-                                    ▶
-                                  </span>
-                                  <span className="flex-1 text-xs font-medium">
-                                    {entry.commodity.name}
-                                  </span>
-                                  {entry.commodity.category && (
-                                    <span
-                                      className="text-xs px-1.5 rounded font-mono"
-                                      style={{ background: '#e8f3ec', color: '#1b5e3b' }}
-                                    >
-                                      {entry.commodity.category}
-                                    </span>
-                                  )}
-                                  <span className="font-mono text-xs font-semibold">
-                                    {formatRupiah(entry.latestPrice)}
-                                  </span>
-                                  <span className="text-xs" style={{ color: '#8a8580' }}>
-                                    /{entry.commodity.unit}
-                                  </span>
+                                    className="text-xs flex-shrink-0"
+                                    style={{ color: '#8a8580', transform: commOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s', display: 'inline-block' }}
+                                  >▶</span>
+                                  <span className="flex-1 text-xs font-medium">{entry.commRaw}</span>
+                                  <span className="font-mono text-xs font-semibold">{formatRupiah(entry.latestPrice)}</span>
+                                  <span className="text-xs" style={{ color: '#8a8580' }}>/kg</span>
                                   <span className="text-xs ml-2" style={{ color: '#8a8580' }}>
-                                    {entry.latestDate ? formatDate(entry.latestDate) : '—'}
+                                    {formatDate(entry.latestDate)}
                                   </span>
                                 </button>
 
                                 {/* Chart detail (Level 3) */}
                                 {commOpen && (
                                   <div className="px-6 pb-4 pt-2" style={{ background: '#f5f1ea' }}>
-                                    <div className="flex items-center gap-4 mb-2">
+                                    <div className="flex items-center gap-4 mb-3">
                                       <div>
-                                        <div className="text-xs" style={{ color: '#8a8580' }}>
-                                          Harga Terakhir
-                                        </div>
-                                        <div className="text-base font-bold font-mono">
-                                          {formatRupiah(entry.latestPrice)}
-                                        </div>
+                                        <div className="text-xs" style={{ color: '#8a8580' }}>Harga Terakhir</div>
+                                        <div className="text-base font-bold font-mono">{formatRupiah(entry.latestPrice)}</div>
                                       </div>
                                       {entry.het != null && (
                                         <div>
-                                          <div className="text-xs" style={{ color: '#8a8580' }}>
-                                            HET Pemerintah
-                                          </div>
-                                          <div
-                                            className="text-sm font-mono"
-                                            style={{ color: '#ef4444' }}
-                                          >
-                                            {formatRupiah(entry.het)}
-                                          </div>
+                                          <div className="text-xs" style={{ color: '#8a8580' }}>HET Pemerintah</div>
+                                          <div className="text-sm font-mono" style={{ color: '#ef4444' }}>{formatRupiah(entry.het)}</div>
                                         </div>
                                       )}
                                       <div>
-                                        <div className="text-xs" style={{ color: '#8a8580' }}>
-                                          Satuan
-                                        </div>
-                                        <div className="text-sm">/{entry.commodity.unit}</div>
+                                        <div className="text-xs" style={{ color: '#8a8580' }}>Data points</div>
+                                        <div className="text-sm font-mono">{entry.history.length}</div>
                                       </div>
                                     </div>
                                     <PriceChart

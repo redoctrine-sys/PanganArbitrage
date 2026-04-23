@@ -2,14 +2,22 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServiceClient } from '@/lib/supabase'
 import type { SP2KPRow } from '@/types/prices'
 
-// Accepts pre-parsed rows as JSON — avoids Vercel 4.5MB body limit on file uploads
+const ALLOWED_KODE_PREFIXES = new Set(['31', '32', '33', '34', '35', '36', '51', '52'])
+
+// Accepts pre-parsed rows as JSON — avoids Vercel 4.5MB body limit
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const rows: SP2KPRow[] = body.rows ?? []
+    const rawRows: SP2KPRow[] = body.rows ?? []
+
+    // Safety-net: enforce province scope even if client skipped filtering
+    const rows = rawRows.filter((r) => {
+      if (!r.kode_wilayah) return true
+      return ALLOWED_KODE_PREFIXES.has(String(r.kode_wilayah).slice(0, 2))
+    })
 
     if (!rows.length) {
-      return NextResponse.json({ error: 'Tidak ada baris' }, { status: 400 })
+      return NextResponse.json({ error: 'Tidak ada baris dalam cakupan provinsi yang diizinkan' }, { status: 400 })
     }
 
     const db = getServiceClient()

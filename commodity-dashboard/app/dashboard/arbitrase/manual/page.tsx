@@ -1,13 +1,15 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { formatRupiah } from '@/lib/utils/format-rupiah'
+import type { Commodity } from '@/types/prices'
 
 type Leg = {
   id: string
   city_from: string
   city_to: string
   commodity: string
+  commodity_id: string
   price_buy: number
   price_sell: number
   quantity_kg: number
@@ -20,6 +22,8 @@ type LegResult = Leg & {
   net_profit: number
   roi_pct: number
 }
+
+type PriceSuggest = { avg: number | null; min: number | null; max: number | null; count: number }
 
 function computeLeg(leg: Leg): LegResult {
   const gross_profit = (leg.price_sell - leg.price_buy) * leg.quantity_kg
@@ -35,6 +39,7 @@ const EMPTY_LEG = (): Leg => ({
   city_from: '',
   city_to: '',
   commodity: '',
+  commodity_id: '',
   price_buy: 0,
   price_sell: 0,
   quantity_kg: 1000,
@@ -43,6 +48,16 @@ const EMPTY_LEG = (): Leg => ({
 
 export default function ArbitraseManualPage() {
   const [legs, setLegs] = useState<Leg[]>([EMPTY_LEG()])
+  const [commodities, setCommodities] = useState<Commodity[]>([])
+  const [suggestions, setSuggestions] = useState<Record<string, { buy?: PriceSuggest; sell?: PriceSuggest }>>({})
+  const [loadingSuggest, setLoadingSuggest] = useState<Record<string, boolean>>({})
+
+  useEffect(() => {
+    fetch('/api/admin/commodities-list')
+      .then((r) => r.json())
+      .then((d) => setCommodities(d.data ?? []))
+      .catch(() => {})
+  }, [])
 
   function updateLeg(id: string, field: keyof Leg, value: string | number) {
     setLegs((prev) => prev.map((l) => (l.id === id ? { ...l, [field]: value } : l)))
@@ -54,6 +69,37 @@ export default function ArbitraseManualPage() {
 
   function removeLeg(id: string) {
     setLegs((prev) => prev.filter((l) => l.id !== id))
+  }
+
+  async function fetchSuggest(legId: string, leg: Leg) {
+    if (!leg.commodity_id) return
+    const cities = [leg.city_from?.trim(), leg.city_to?.trim()].filter(Boolean)
+    if (!cities.length) return
+
+    setLoadingSuggest((p) => ({ ...p, [legId]: true }))
+    try {
+      const [buyRes, sellRes] = await Promise.all([
+        leg.city_from?.trim()
+          ? fetch(`/api/prices/suggest?commodity_id=${leg.commodity_id}&city_name=${encodeURIComponent(leg.city_from.trim())}`)
+          : Promise.resolve(null),
+        leg.city_to?.trim()
+          ? fetch(`/api/prices/suggest?commodity_id=${leg.commodity_id}&city_name=${encodeURIComponent(leg.city_to.trim())}`)
+          : Promise.resolve(null),
+      ])
+      const [buyData, sellData] = await Promise.all([
+        buyRes?.json() ?? null,
+        sellRes?.json() ?? null,
+      ])
+      setSuggestions((p) => ({
+        ...p,
+        [legId]: {
+          buy: buyData?.avg != null ? buyData : undefined,
+          sell: sellData?.avg != null ? sellData : undefined,
+        },
+      }))
+    } finally {
+      setLoadingSuggest((p) => ({ ...p, [legId]: false }))
+    }
   }
 
   const results = legs.map(computeLeg)
@@ -95,6 +141,8 @@ export default function ArbitraseManualPage() {
           {legs.map((leg, idx) => {
             const res = computeLeg(leg)
             const isViable = res.net_profit > 0
+            const sug = suggestions[leg.id]
+            const isLoadingSug = loadingSuggest[leg.id]
             return (
               <div
                 key={leg.id}
@@ -145,21 +193,104 @@ export default function ArbitraseManualPage() {
                 </div>
 
                 {/* Leg inputs */}
-                <div className="p-3 grid grid-cols-2 gap-3">
-                  <LegInput label="Kota Asal (Beli)" value={leg.city_from}
-                    onChange={(v) => updateLeg(leg.id, 'city_from', v)} placeholder="Jakarta" />
-                  <LegInput label="Kota Tujuan (Jual)" value={leg.city_to}
-                    onChange={(v) => updateLeg(leg.id, 'city_to', v)} placeholder="Surabaya" />
-                  <LegInput label="Komoditas" value={leg.commodity}
-                    onChange={(v) => updateLeg(leg.id, 'commodity', v)} placeholder="Bawang Merah" />
-                  <LegInput label="Kuantitas (kg)" value={leg.quantity_kg} type="number"
-                    onChange={(v) => updateLeg(leg.id, 'quantity_kg', Number(v))} placeholder="1000" />
-                  <LegInput label="Harga Beli (Rp/kg)" value={leg.price_buy} type="number"
-                    onChange={(v) => updateLeg(leg.id, 'price_buy', Number(v))} placeholder="15000" />
-                  <LegInput label="Harga Jual (Rp/kg)" value={leg.price_sell} type="number"
-                    onChange={(v) => updateLeg(leg.id, 'price_sell', Number(v))} placeholder="20000" />
-                  <LegInput label="Biaya Transport (Rp/kg)" value={leg.transport_cost_per_kg} type="number"
-                    onChange={(v) => updateLeg(leg.id, 'transport_cost_per_kg', Number(v))} placeholder="500" />
+                <div className="p-3 space-y-3">
+                  {/* Commodity picker from data */}
+                  <div>
+                    <label className="block text-xs font-medium mb-1" style={{ color: '#8a8580' }}>
+                      Komoditas (dari data)
+                    </label>
+                    <div className="flex gap-2">
+                      <select
+                        value={leg.commodity_id}
+                        onChange={(e) => {
+                          const selected = commodities.find((c) => c.id === e.target.value)
+                          setLegs((prev) => prev.map((l) =>
+                            l.id === leg.id
+                              ? { ...l, commodity_id: e.target.value, commodity: selected?.name ?? l.commodity }
+                              : l
+                          ))
+                          setSuggestions((p) => ({ ...p, [leg.id]: {} }))
+                        }}
+                        className="flex-1 text-xs px-2.5 py-1.5 rounded-md outline-none"
+                        style={{ border: '1px solid #d8d4cb', background: '#fff' }}
+                      >
+                        <option value="">-- Pilih dari data (opsional) --</option>
+                        {commodities.map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                      {leg.commodity_id && (
+                        <button
+                          onClick={() => fetchSuggest(leg.id, leg)}
+                          disabled={isLoadingSug}
+                          className="px-2.5 py-1.5 rounded-md text-xs font-medium"
+                          style={{ background: '#1e3a5f', color: '#dbeafe' }}
+                        >
+                          {isLoadingSug ? '...' : '🔍 Cari Harga'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Price suggestions */}
+                  {(sug?.buy || sug?.sell) && (
+                    <div
+                      className="rounded-lg p-2 flex gap-4 text-xs flex-wrap"
+                      style={{ background: '#f0f9ff', border: '1px solid #bae6fd' }}
+                    >
+                      <span className="font-medium" style={{ color: '#0c4a6e' }}>Saran dari data (30 hari):</span>
+                      {sug.buy?.avg != null && (
+                        <div className="flex items-center gap-1.5">
+                          <span style={{ color: '#64748b' }}>Beli ({leg.city_from}):</span>
+                          <span className="font-mono font-semibold" style={{ color: '#166534' }}>
+                            {formatRupiah(sug.buy.avg)}
+                          </span>
+                          <span style={{ color: '#94a3b8' }}>({sug.buy.count} data)</span>
+                          <button
+                            onClick={() => updateLeg(leg.id, 'price_buy', sug.buy!.avg!)}
+                            className="px-1.5 py-0.5 rounded text-xs"
+                            style={{ background: '#166534', color: '#fff' }}
+                          >
+                            Pakai
+                          </button>
+                        </div>
+                      )}
+                      {sug.sell?.avg != null && (
+                        <div className="flex items-center gap-1.5">
+                          <span style={{ color: '#64748b' }}>Jual ({leg.city_to}):</span>
+                          <span className="font-mono font-semibold" style={{ color: '#1e3a5f' }}>
+                            {formatRupiah(sug.sell.avg)}
+                          </span>
+                          <span style={{ color: '#94a3b8' }}>({sug.sell.count} data)</span>
+                          <button
+                            onClick={() => updateLeg(leg.id, 'price_sell', sug.sell!.avg!)}
+                            className="px-1.5 py-0.5 rounded text-xs"
+                            style={{ background: '#1e3a5f', color: '#fff' }}
+                          >
+                            Pakai
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Regular inputs grid */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <LegInput label="Kota Asal (Beli)" value={leg.city_from}
+                      onChange={(v) => updateLeg(leg.id, 'city_from', v)} placeholder="Jakarta" />
+                    <LegInput label="Kota Tujuan (Jual)" value={leg.city_to}
+                      onChange={(v) => updateLeg(leg.id, 'city_to', v)} placeholder="Surabaya" />
+                    <LegInput label="Komoditas (nama)" value={leg.commodity}
+                      onChange={(v) => updateLeg(leg.id, 'commodity', v)} placeholder="Bawang Merah" />
+                    <LegInput label="Kuantitas (kg)" value={leg.quantity_kg} type="number"
+                      onChange={(v) => updateLeg(leg.id, 'quantity_kg', Number(v))} placeholder="1000" />
+                    <LegInput label="Harga Beli (Rp/kg)" value={leg.price_buy} type="number"
+                      onChange={(v) => updateLeg(leg.id, 'price_buy', Number(v))} placeholder="15000" />
+                    <LegInput label="Harga Jual (Rp/kg)" value={leg.price_sell} type="number"
+                      onChange={(v) => updateLeg(leg.id, 'price_sell', Number(v))} placeholder="20000" />
+                    <LegInput label="Biaya Transport (Rp/kg)" value={leg.transport_cost_per_kg} type="number"
+                      onChange={(v) => updateLeg(leg.id, 'transport_cost_per_kg', Number(v))} placeholder="500" />
+                  </div>
                 </div>
 
                 {/* Leg results */}
