@@ -48,6 +48,7 @@ export function parseSP2KPCSV(csvText: string): ParsedCSV {
       rows: [],
       errors: [`Format tidak dikenali. Delimiter: "${delName}", Kolom pertama: [${sample}]`],
       total: 0,
+      filteredOut: 0,
     }
   }
 
